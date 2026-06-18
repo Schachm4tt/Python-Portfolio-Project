@@ -6,7 +6,7 @@ from .models import Location, TravelMode
 
 # km/h averages including typical stops/overhead
 _SPEED = {
-    TravelMode.CAR: 80,
+    TravelMode.CAR: 100,
     TravelMode.TRAIN: 100,
     TravelMode.FLIGHT: 600,
 }
@@ -18,26 +18,8 @@ _OVERHEAD = {
     TravelMode.FLIGHT: timedelta(hours=2, minutes=30),  # airport, security, boarding
 }
 
-# Distance thresholds in km
-_CAR_MAX_KM = 200
-_FLIGHT_MIN_KM = 800
-
-# Prefer own car from home up to this distance
-_OWN_CAR_PREFERENCE_KM = 400
-
-
 def distance_km(a: Location, b: Location) -> float:
     return geodesic((a.lat, a.lon), (b.lat, b.lon)).km
-
-
-def select_mode(km: float, from_home: bool = False) -> TravelMode:
-    if km <= _CAR_MAX_KM:
-        return TravelMode.CAR
-    if from_home and km <= _OWN_CAR_PREFERENCE_KM:
-        return TravelMode.CAR
-    if km >= _FLIGHT_MIN_KM:
-        return TravelMode.FLIGHT
-    return TravelMode.TRAIN
 
 
 def travel_time(km: float, mode: TravelMode) -> timedelta:
@@ -45,23 +27,28 @@ def travel_time(km: float, mode: TravelMode) -> timedelta:
     return timedelta(hours=drive_hours) + _OVERHEAD[mode]
 
 
+_FLIGHT_MIN_ADVANTAGE = timedelta(hours=4)
+
+
 def best_leg(origin: Location, destination: Location, home: Location) -> tuple[TravelMode, timedelta]:
-    """Return the fastest (mode, travel_time) for a single leg."""
+    """Return the fastest (mode, travel_time) for a single leg.
+
+    Flight is only chosen if it saves at least 4 hours over the best ground alternative.
+    """
     km = distance_km(origin, destination)
-    from_home = origin.city == home.city
 
-    preferred = select_mode(km, from_home=from_home)
-    preferred_time = travel_time(km, preferred)
+    ground_candidates = [
+        (mode, travel_time(km, mode))
+        for mode in (TravelMode.CAR, TravelMode.TRAIN)
+    ]
+    best_ground = min(ground_candidates, key=lambda x: x[1])
 
-    # Always compare against alternatives and pick the fastest
-    candidates = []
-    for mode in TravelMode:
-        if mode == TravelMode.FLIGHT and km < 300:
-            # Flight never makes sense under 300km
-            continue
-        candidates.append((mode, travel_time(km, mode)))
+    if km >= 300:
+        flight_time = travel_time(km, TravelMode.FLIGHT)
+        if best_ground[1] - flight_time >= _FLIGHT_MIN_ADVANTAGE:
+            return TravelMode.FLIGHT, flight_time
 
-    return min(candidates, key=lambda x: x[1])
+    return best_ground
 
 
 def build_time_matrix(

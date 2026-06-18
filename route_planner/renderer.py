@@ -28,7 +28,7 @@ def _render_day(day: Day, day_index: int) -> list[str]:
     lines.append(f"{day_name.upper()}, {date_str}")
     lines.append("-" * 54)
 
-    if day.is_empty:
+    if day.is_empty and not day.legs:
         lines.append("  (no visits scheduled)")
         lines.append("")
         return lines
@@ -63,6 +63,9 @@ def _render_day(day: Day, day_index: int) -> list[str]:
             lines.append(
                 f"  {arrive} - {depart}  ON-SITE  {client.name} / {client.city}{priority_marker}  ({duration})"
             )
+
+    if day.overnight_at:
+        lines.append(f"  ** OVERNIGHT STAY in {day.overnight_at.city} **")
 
     travel_str = _fmt_duration(day.total_travel_time)
     lines.append(f"  Travel today: {travel_str}")

@@ -65,6 +65,7 @@ class Day:
     date: date
     legs: list[Leg] = field(default_factory=list)
     visits: list[Visit] = field(default_factory=list)
+    overnight_at: "Location | None" = None  # set when sleeping away from home
 
     @property
     def total_travel_time(self) -> timedelta:
