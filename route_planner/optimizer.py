@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timedelta
+from itertools import permutations
 
 from .models import Client, Day, Leg, Location, TravelMode, Visit, WeeklyPlan
 
@@ -177,6 +178,189 @@ def _try_overnight(
     return True
 
 
+def _simulate_day(
+    day_date: date,
+    clients: list[Client],
+    start_loc: Location,
+    home: Location,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+) -> "Day | None":
+    """
+    Simulate a day with clients visited in a fixed order from start_loc.
+    Returns the Day if all constraints are satisfied, None if infeasible.
+    """
+    if not clients:
+        return Day(date=day_date)
+
+    day = Day(date=day_date)
+    current_loc = start_loc
+    current_time = _dt(day_date, DEPART_HOME)
+    home_idx = loc_index[home.city]
+
+    for client in clients:
+        cur_idx = loc_index[current_loc.city]
+        cli_idx = loc_index[client.city]
+        mode, travel = matrix[cur_idx][cli_idx]
+
+        arrive = current_time + travel
+        arrive = max(arrive, _dt(day_date, client.window_start))
+
+        if arrive.time() > client.latest_arrival:
+            return None
+
+        depart_visit = arrive + client.duration
+        if depart_visit.time() > client.window_end:
+            return None
+
+        _, home_travel = matrix[cli_idx][home_idx]
+        if (depart_visit + home_travel).time() > CURFEW:
+            return None
+
+        day.legs.append(Leg(
+            origin=current_loc, destination=client.to_location(),
+            mode=mode, travel_time=travel,
+            depart_at=current_time, arrive_at=arrive,
+        ))
+        day.visits.append(Visit(client=client, arrive_at=arrive, depart_at=depart_visit))
+        current_loc = client.to_location()
+        current_time = depart_visit
+
+    if current_loc.city != home.city:
+        cur_idx = loc_index[current_loc.city]
+        mode, travel = matrix[cur_idx][home_idx]
+        day.legs.append(Leg(
+            origin=current_loc, destination=home,
+            mode=mode, travel_time=travel,
+            depart_at=current_time, arrive_at=current_time + travel,
+        ))
+
+    return day
+
+
+def _best_order(
+    day: Day,
+    home: Location,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+) -> Day:
+    """Try every visit ordering for a single day, return the fastest feasible one."""
+    clients = [v.client for v in day.visits]
+    best = day
+    for perm in permutations(clients):
+        candidate = _simulate_day(day.date, list(perm), home, home, loc_index, matrix)
+        if candidate and candidate.total_travel_time < best.total_travel_time:
+            best = candidate
+    return best
+
+
+def _improve(
+    plan: WeeklyPlan,
+    home: Location,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+) -> WeeklyPlan:
+    """
+    Local search improvement over the greedy plan. Runs until no improvement is found.
+    Three move types (in order of increasing complexity):
+      1. Intra-day reorder  — try all visit orderings within each day
+      2. Single move        — move one client from day i to day j
+      3. Swap               — exchange one client between day i and day j
+    Overnight days and their follow-up days (which start from a non-home city) are skipped.
+    """
+    def _is_improvable(day_idx: int) -> bool:
+        day = plan.days[day_idx]
+        if day.overnight_at:
+            return False
+        if day_idx > 0 and plan.days[day_idx - 1].overnight_at:
+            return False  # Starts from non-home city — simulation would be wrong
+        return True
+
+    def _try_all_orders(clients: list[Client], day_date: date) -> "Day | None":
+        best: "Day | None" = None
+        for perm in permutations(clients):
+            c = _simulate_day(day_date, list(perm), home, home, loc_index, matrix)
+            if c and (best is None or c.total_travel_time < best.total_travel_time):
+                best = c
+        return best
+
+    improved = True
+    while improved:
+        improved = False
+
+        # 1. Intra-day reorder
+        for i in range(5):
+            if not _is_improvable(i) or len(plan.days[i].visits) <= 1:
+                continue
+            better = _best_order(plan.days[i], home, loc_index, matrix)
+            if better.total_travel_time < plan.days[i].total_travel_time:
+                plan.days[i] = better
+                improved = True
+
+        # 2. Move one client from day i to day j
+        for i in range(5):
+            if not _is_improvable(i):
+                continue
+            for j in range(5):
+                if i == j or not _is_improvable(j):
+                    continue
+                for visit in plan.days[i].visits:
+                    clients_i = [v.client for v in plan.days[i].visits if v.client.name != visit.client.name]
+                    clients_j = [v.client for v in plan.days[j].visits] + [visit.client]
+
+                    new_i = _simulate_day(plan.days[i].date, clients_i, home, home, loc_index, matrix) \
+                            if clients_i else Day(date=plan.days[i].date)
+                    new_j = _try_all_orders(clients_j, plan.days[j].date)
+
+                    if new_i is not None and new_j is not None:
+                        old = plan.days[i].total_travel_time + plan.days[j].total_travel_time
+                        new = new_i.total_travel_time + new_j.total_travel_time
+                        if new < old:
+                            plan.days[i] = new_i
+                            plan.days[j] = new_j
+                            improved = True
+                            break
+                if improved:
+                    break
+            if improved:
+                break
+
+        # 3. Swap one client between day i and day j
+        if not improved:
+            for i in range(5):
+                if not _is_improvable(i):
+                    continue
+                for j in range(i + 1, 5):
+                    if not _is_improvable(j):
+                        continue
+                    for vi in plan.days[i].visits:
+                        for vj in plan.days[j].visits:
+                            clients_i = [vj.client if v.client.name == vi.client.name else v.client
+                                         for v in plan.days[i].visits]
+                            clients_j = [vi.client if v.client.name == vj.client.name else v.client
+                                         for v in plan.days[j].visits]
+
+                            new_i = _try_all_orders(clients_i, plan.days[i].date)
+                            new_j = _try_all_orders(clients_j, plan.days[j].date)
+
+                            if new_i and new_j:
+                                old = plan.days[i].total_travel_time + plan.days[j].total_travel_time
+                                new = new_i.total_travel_time + new_j.total_travel_time
+                                if new < old:
+                                    plan.days[i] = new_i
+                                    plan.days[j] = new_j
+                                    improved = True
+                                    break
+                        if improved:
+                            break
+                    if improved:
+                        break
+                if improved:
+                    break
+
+    return plan
+
+
 def build_weekly_plan(
     home: Location,
     clients: list[Client],
@@ -241,6 +425,9 @@ def build_weekly_plan(
                 break
 
     plan.unscheduled = [c for c in clients if c.name not in scheduled]
+
+    # Local search: improve visit ordering and cross-day assignments
+    plan = _improve(plan, home, loc_index, matrix)
 
     for day in plan.days:
         if day.overnight_at:
