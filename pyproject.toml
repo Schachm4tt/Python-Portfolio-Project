@@ -11,4 +11,5 @@ dependencies = [
     "pandas>=3.0.3",
     "pyyaml>=6.0.3",
     "seaborn>=0.13.2",
+    "streamlit>=1.58.0",
 ]

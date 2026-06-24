@@ -16,6 +16,9 @@ class Location:
     lon: float
 
 
+ALL_DAYS: frozenset = frozenset(range(5))  # Mon=0 … Fri=4
+
+
 @dataclass
 class Client:
     name: str
@@ -26,6 +29,7 @@ class Client:
     priority: bool
     lat: float = 0.0
     lon: float = 0.0
+    allowed_days: frozenset = field(default_factory=lambda: frozenset(range(5)))
 
     @property
     def duration(self) -> timedelta:

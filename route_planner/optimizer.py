@@ -26,6 +26,9 @@ def _find_feasible(
     home_idx = loc_index[home.city]
 
     for client in candidates:
+        if day_date.weekday() not in client.allowed_days:
+            continue
+
         cli_idx = loc_index[client.city]
         mode, travel = matrix[cur_idx][cli_idx]
 
@@ -128,6 +131,8 @@ def _try_overnight(
     """
     day = plan.days[day_idx]
     if not day.is_empty or day.overnight_at is not None or day_idx >= 4:
+        return False
+    if week_dates[day_idx].weekday() not in client.allowed_days:
         return False
 
     day_date = week_dates[day_idx]
@@ -305,6 +310,8 @@ def _improve(
                 if i == j or not _is_improvable(j):
                     continue
                 for visit in plan.days[i].visits:
+                    if plan.days[j].date.weekday() not in visit.client.allowed_days:
+                        continue
                     clients_i = [v.client for v in plan.days[i].visits if v.client.name != visit.client.name]
                     clients_j = [v.client for v in plan.days[j].visits] + [visit.client]
 
@@ -335,6 +342,10 @@ def _improve(
                         continue
                     for vi in plan.days[i].visits:
                         for vj in plan.days[j].visits:
+                            if plan.days[j].date.weekday() not in vi.client.allowed_days:
+                                continue
+                            if plan.days[i].date.weekday() not in vj.client.allowed_days:
+                                continue
                             clients_i = [vj.client if v.client.name == vi.client.name else v.client
                                          for v in plan.days[i].visits]
                             clients_j = [vi.client if v.client.name == vj.client.name else v.client
