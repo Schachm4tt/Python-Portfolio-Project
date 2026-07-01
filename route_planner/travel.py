@@ -6,16 +6,16 @@ from .models import Location, TravelMode
 
 # km/h averages including typical stops/overhead
 _SPEED = {
-    TravelMode.CAR: 100,
-    TravelMode.TRAIN: 100,
+    TravelMode.CAR:    100,   # Autobahn average with traffic
+    TravelMode.TRAIN:  150,   # ICE/high-speed effective speed, city-centre to city-centre
     TravelMode.FLIGHT: 600,
 }
 
 # Fixed overhead added on top of travel time
 _OVERHEAD = {
-    TravelMode.CAR: timedelta(minutes=0),
-    TravelMode.TRAIN: timedelta(minutes=30),   # station time, boarding
-    TravelMode.FLIGHT: timedelta(hours=2, minutes=30),  # airport, security, boarding
+    TravelMode.CAR:    timedelta(minutes=0),
+    TravelMode.TRAIN:  timedelta(minutes=30),          # station access + boarding
+    TravelMode.FLIGHT: timedelta(hours=2, minutes=30), # airport + security + boarding
 }
 
 def distance_km(a: Location, b: Location) -> float:
@@ -28,45 +28,58 @@ def travel_time(km: float, mode: TravelMode) -> timedelta:
 
 
 _FLIGHT_MIN_ADVANTAGE = timedelta(hours=4)
+_GROUND_MAX_ONE_WAY   = timedelta(hours=6)   # above this, flight is used regardless of savings
 
 
 def best_leg(origin: Location, destination: Location, home: Location) -> tuple[TravelMode, timedelta]:
-    """Return the fastest (mode, travel_time) for a single leg.
+    """Return the fastest (mode, travel_time) for a single leg — train or flight only.
 
-    Flight is only chosen if it saves at least 4 hours over the best ground alternative.
+    Car is never returned here; it is only available via build_car_matrix for days
+    where the traveller explicitly drove from home and keeps the car all day.
+    Flight is chosen when it saves ≥ 4 h over train,
+    OR when train one-way exceeds 6 h (making a same-day return infeasible).
     """
     km = distance_km(origin, destination)
-
-    ground_candidates = [
-        (mode, travel_time(km, mode))
-        for mode in (TravelMode.CAR, TravelMode.TRAIN)
-    ]
-    best_ground = min(ground_candidates, key=lambda x: x[1])
+    train_time = travel_time(km, TravelMode.TRAIN)
 
     if km >= 300:
         flight_time = travel_time(km, TravelMode.FLIGHT)
-        if best_ground[1] - flight_time >= _FLIGHT_MIN_ADVANTAGE:
+        has_advantage   = train_time - flight_time >= _FLIGHT_MIN_ADVANTAGE
+        ground_too_slow = train_time > _GROUND_MAX_ONE_WAY
+        if has_advantage or ground_too_slow:
             return TravelMode.FLIGHT, flight_time
 
-    return best_ground
+    return TravelMode.TRAIN, train_time
 
 
 def build_time_matrix(
     locations: list[Location], home: Location
 ) -> list[list[tuple[TravelMode, timedelta]]]:
-    """
-    Build an NxN matrix where matrix[i][j] = (mode, travel_time) from location i to j.
-    Diagonal is (CAR, 0).
-    """
+    """Train/flight matrix — the default for all days without a car."""
     n = len(locations)
     matrix: list[list[tuple[TravelMode, timedelta]]] = [
         [(TravelMode.CAR, timedelta())] * n for _ in range(n)
     ]
-
     for i in range(n):
         for j in range(n):
             if i == j:
                 continue
             matrix[i][j] = best_leg(locations[i], locations[j], home)
+    return matrix
 
+
+def build_car_matrix(locations: list[Location]) -> list[list[tuple[TravelMode, timedelta]]]:
+    """All-car matrix — only valid for days where the car was taken from home.
+    Every leg uses CAR; the car travels with the user for the entire day and back.
+    """
+    n = len(locations)
+    matrix: list[list[tuple[TravelMode, timedelta]]] = [
+        [(TravelMode.CAR, timedelta())] * n for _ in range(n)
+    ]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            km = distance_km(locations[i], locations[j])
+            matrix[i][j] = (TravelMode.CAR, travel_time(km, TravelMode.CAR))
     return matrix

@@ -1,38 +1,74 @@
-home: "Berlin"
-week_start: "2026-06-22"
+home: "Frankfurt am Main"
+week_start: "2026-07-06"
 
 clients:
-  - name: "Client A"
+  # Germany — 6 clients
+
+  - name: "Müller Consulting GmbH"
+    city: "Munich"
+    duration_hours: 2.5
+    window_start: "09:00"
+    window_end: "17:00"
+    priority: true
+
+  - name: "Nordsee Handels AG"
+    city: "Hamburg"
+    duration_hours: 2
+    window_start: "08:00"
+    window_end: "16:00"
+    priority: true
+
+  - name: "Berliner Innovations GmbH"
+    city: "Berlin"
+    duration_hours: 3
+    window_start: "10:00"
+    window_end: "17:00"
+    priority: true
+
+  - name: "Rhein-Media KG"
+    city: "Cologne"
+    duration_hours: 1.5
+    window_start: "09:00"
+    window_end: "15:00"
+    priority: false
+
+  - name: "Hannover Logistik GmbH"
     city: "Hannover"
+    duration_hours: 2
+    window_start: "08:00"
+    window_end: "17:00"
+    priority: false
+
+  - name: "SchwabTech AG"
+    city: "Stuttgart"
+    duration_hours: 2
+    window_start: "09:00"
+    window_end: "17:00"
+    priority: false
+
+  # Austria — 1 client
+
+  - name: "Donau Industrie GmbH"
+    city: "Vienna"
     duration_hours: 3
     window_start: "09:00"
     window_end: "17:00"
     priority: true
 
-  - name: "Client B"
-    city: "Hamburg"
-    duration_hours: 2
-    window_start: "08:00"
-    window_end: "17:00"
-    priority: true
+  # Netherlands — 1 client
 
-  - name: "Client C"
-    city: "Leipzig"
+  - name: "Van der Berg & Partners"
+    city: "Amsterdam"
     duration_hours: 2
     window_start: "09:00"
-    window_end: "17:00"
-    priority: false
-
-  - name: "Client D"
-    city: "Kiel"
-    duration_hours: 1
-    window_start: "10:00"
     window_end: "16:00"
     priority: false
 
-  - name: "Client E"
-    city: "Vienna"
-    duration_hours: 4
-    window_start: "08:00"
-    window_end: "17:00"
-    priority: true
+  # Switzerland — 1 client
+
+  - name: "Helvetia Finanz AG"
+    city: "Zurich"
+    duration_hours: 1.5
+    window_start: "10:00"
+    window_end: "16:00"
+    priority: false

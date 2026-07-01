@@ -8,7 +8,7 @@ from datetime import date, time, timedelta
 
 from route_planner.geocoder import geocode_city  # noqa: E402
 from route_planner.models import Client, Location, WeeklyPlan  # noqa: E402
-from route_planner.optimizer import build_weekly_plan  # noqa: E402
+from route_planner.optimizer import build_weekly_plan, build_weekly_plan_forced  # noqa: E402
 from route_planner.travel import build_time_matrix  # noqa: E402
 
 ALL_DAYS: frozenset = frozenset(range(5))  # Mon=0 … Fri=4
@@ -186,7 +186,7 @@ def _render_legend() -> None:
 
 st.set_page_config(page_title="Route Planner", layout="wide", page_icon="\U0001f5fa")
 
-for key, val in [("clients", []), ("plan", None), ("editing_idx", None)]:
+for key, val in [("clients", []), ("plan", None), ("editing_idx", None), ("force_mode", False)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -263,6 +263,11 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+    force_mode = st.checkbox(
+        "Force all clients into one week",
+        help="Chains overnight stays day-to-day instead of returning home each evening. "
+             "Fits more clients at the cost of more nights away from home.",
+    )
     generate = st.button(
         "Generate Plan", type="primary", use_container_width=True,
         disabled=not st.session_state.clients,
@@ -305,8 +310,12 @@ if generate and st.session_state.clients:
             locations = [home_loc] + [c.to_location() for c in geocoded]
             matrix    = build_time_matrix(locations, home_loc)
             week_start = week_input if isinstance(week_input, date) else date.today()
-            plan = build_weekly_plan(home_loc, geocoded, matrix, locations, week_start)
+            if force_mode:
+                plan = build_weekly_plan_forced(home_loc, geocoded, matrix, locations, week_start)
+            else:
+                plan = build_weekly_plan(home_loc, geocoded, matrix, locations, week_start)
             st.session_state.plan = plan
+            st.session_state.force_mode = force_mode
 
 
 # ── Display ────────────────────────────────────────────────────────────────────
@@ -321,10 +330,11 @@ if st.session_state.plan:
     n_sched = len(plan.scheduled_clients)
     n_total = n_sched + len(plan.unscheduled)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total travel time",  f"{h}h {m:02d}m")
     c2.metric("Clients scheduled",  f"{n_sched} / {n_total}")
     c3.metric("Overnight stays",    "Yes" if plan.has_overnight else "No")
+    c4.metric("Mode", "Forced" if st.session_state.get("force_mode") else "Normal")
 
     _render_legend()
     st.divider()

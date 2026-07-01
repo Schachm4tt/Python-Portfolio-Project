@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timedelta
 from itertools import permutations
 
 from .models import Client, Day, Leg, Location, TravelMode, Visit, WeeklyPlan
+from .travel import build_car_matrix
 
 DEPART_HOME = time(7, 0)
 CURFEW = time(21, 0)
@@ -108,6 +109,75 @@ def _run_greedy(
         ))
 
     return day, scheduled_names
+
+
+def _find_feasible_chain(
+    candidates: list[Client],
+    current_loc: Location,
+    current_time: datetime,
+    day_date: date,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+) -> list[tuple[Client, datetime, TravelMode, timedelta]]:
+    """Like _find_feasible but skips the home-return curfew check (for chained overnights)."""
+    results = []
+    cur_idx = loc_index[current_loc.city]
+    for client in candidates:
+        if day_date.weekday() not in client.allowed_days:
+            continue
+        cli_idx = loc_index[client.city]
+        mode, travel = matrix[cur_idx][cli_idx]
+        arrive = current_time + travel
+        arrive = max(arrive, _dt(day_date, client.window_start))
+        if arrive.time() > client.latest_arrival:
+            continue
+        depart_visit = arrive + client.duration
+        if depart_visit.time() > client.window_end:
+            continue
+        results.append((client, arrive, mode, travel))
+    return results
+
+
+def _run_greedy_chain(
+    day_date: date,
+    candidates: list[Client],
+    start_loc: Location,
+    home: Location,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+    start_time: datetime | None = None,
+) -> tuple[Day, list[str], Location, datetime]:
+    """
+    Greedy day filler without a forced return-home leg.
+    Returns (Day, scheduled_names, end_loc, end_time).
+    """
+    day = Day(date=day_date)
+    scheduled_names: list[str] = []
+    remaining = list(candidates)
+    current_loc = start_loc
+    current_time = start_time or _dt(day_date, DEPART_HOME)
+
+    while True:
+        feasible = _find_feasible_chain(remaining, current_loc, current_time, day_date, loc_index, matrix)
+        if not feasible:
+            break
+        priority_feasible = [f for f in feasible if f[0].priority]
+        pool = priority_feasible if priority_feasible else feasible
+        client, arrive, mode, travel = min(pool, key=lambda x: x[1])
+        client_loc = client.to_location()
+        depart_visit = arrive + client.duration
+        day.legs.append(Leg(
+            origin=current_loc, destination=client_loc,
+            mode=mode, travel_time=travel,
+            depart_at=current_time, arrive_at=arrive,
+        ))
+        day.visits.append(Visit(client=client, arrive_at=arrive, depart_at=depart_visit))
+        current_loc = client_loc
+        current_time = depart_visit
+        scheduled_names.append(client.name)
+        remaining = [c for c in remaining if c.name != client.name]
+
+    return day, scheduled_names, current_loc, current_time
 
 
 def _try_overnight(
@@ -279,6 +349,9 @@ def _improve(
             return False
         if day_idx > 0 and plan.days[day_idx - 1].overnight_at:
             return False  # Starts from non-home city — simulation would be wrong
+        # Car days use a different matrix; don't mix them with train/flight days
+        if day.legs and all(leg.mode == TravelMode.CAR for leg in day.legs):
+            return False
         return True
 
     def _try_all_orders(clients: list[Client], day_date: date) -> "Day | None":
@@ -386,16 +459,29 @@ def build_weekly_plan(
     plan = WeeklyPlan(home=home, week_start=week_start)
     scheduled: set[str] = set()
     week_dates = [week_start + timedelta(days=i) for i in range(5)]
+    car_matrix = build_car_matrix(locations)
 
-    # Pass 1: greedy scheduling, all days start at home, no overnights
+    # Pass 1: greedy scheduling, all days start at home, no overnights.
+    # Each day independently tries train/flight and car modes; best result wins.
     for day_date in week_dates:
         rem_priority = [c for c in priority_clients if c.name not in scheduled]
         rem_optional = [c for c in optional_clients if c.name not in scheduled]
-        day, day_scheduled = _run_greedy(
-            day_date, rem_priority + rem_optional, home, home, loc_index, matrix
+        rem = rem_priority + rem_optional
+
+        day_t, sched_t = _run_greedy(day_date, rem, home, home, loc_index, matrix)
+        day_c, sched_c = _run_greedy(day_date, rem, home, home, loc_index, car_matrix)
+
+        # Prefer more clients scheduled; break ties with less total travel time
+        use_car = (
+            len(sched_c) > len(sched_t) or
+            (len(sched_c) == len(sched_t) and day_c.total_travel_time < day_t.total_travel_time)
         )
-        plan.days.append(day)
-        scheduled.update(day_scheduled)
+        if use_car:
+            plan.days.append(day_c)
+            scheduled.update(sched_c)
+        else:
+            plan.days.append(day_t)
+            scheduled.update(sched_t)
 
     # Pass 2: overnight trips for priority clients that still couldn't be scheduled
     for client in [c for c in priority_clients if c.name not in scheduled]:
@@ -446,5 +532,79 @@ def build_weekly_plan(
         for leg in day.legs:
             if leg.arrive_at.hour >= 21 or leg.arrive_at.hour < 7:
                 plan.has_overnight = True
+
+    return plan
+
+
+def build_weekly_plan_forced(
+    home: Location,
+    clients: list[Client],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+    locations: list[Location],
+    week_start: date,
+) -> WeeklyPlan:
+    """
+    Aggressive scheduler: chains overnight stays day-to-day to maximise visits
+    in one week. Instead of returning home each evening, stays overnight at the
+    last visited city whenever unscheduled clients remain.
+    Only returns home on Friday (or once all clients are scheduled).
+    """
+    loc_index = {loc.city: i for i, loc in enumerate(locations)}
+    priority_clients = [c for c in clients if c.priority]
+    optional_clients = [c for c in clients if not c.priority]
+
+    plan = WeeklyPlan(home=home, week_start=week_start)
+    scheduled: set[str] = set()
+    week_dates = [week_start + timedelta(days=i) for i in range(5)]
+    current_loc = home
+
+    for day_idx, day_date in enumerate(week_dates):
+        rem_priority = [c for c in priority_clients if c.name not in scheduled]
+        rem_optional = [c for c in optional_clients if c.name not in scheduled]
+        rem = rem_priority + rem_optional
+        is_last = day_idx == 4
+
+        if is_last or not rem:
+            # Last day or all done: run normal greedy with return home at end
+            day, day_scheduled = _run_greedy(
+                day_date, rem, current_loc, home, loc_index, matrix
+            )
+            plan.days.append(day)
+            scheduled.update(day_scheduled)
+            current_loc = home
+        else:
+            day, day_scheduled, end_loc, end_time = _run_greedy_chain(
+                day_date, rem, current_loc, home, loc_index, matrix
+            )
+            scheduled.update(day_scheduled)
+
+            rem_after = [c for c in priority_clients + optional_clients if c.name not in scheduled]
+
+            if rem_after and day.visits and end_loc.city != home.city:
+                # Stay overnight — tomorrow starts from here
+                day.overnight_at = end_loc
+                plan.has_overnight = True
+                current_loc = end_loc
+            else:
+                # All scheduled, no visits today, or already at home — return home
+                if end_loc.city != home.city:
+                    i_idx = loc_index[end_loc.city]
+                    j_idx = loc_index[home.city]
+                    mode, travel = matrix[i_idx][j_idx]
+                    day.legs.append(Leg(
+                        origin=end_loc, destination=home,
+                        mode=mode, travel_time=travel,
+                        depart_at=end_time, arrive_at=end_time + travel,
+                    ))
+                current_loc = home
+
+            plan.days.append(day)
+
+    plan.unscheduled = [c for c in clients if c.name not in scheduled]
+    plan = _improve(plan, home, loc_index, matrix)
+
+    for day in plan.days:
+        if day.overnight_at:
+            plan.has_overnight = True
 
     return plan
