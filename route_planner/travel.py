@@ -1,3 +1,5 @@
+import json
+import urllib.request as _urllib
 from datetime import timedelta
 
 from geopy.distance import geodesic
@@ -68,18 +70,45 @@ def build_time_matrix(
     return matrix
 
 
+_OSRM_TABLE_URL = (
+    "http://router.project-osrm.org/table/v1/driving/{coords}?annotations=duration"
+)
+
+
+def _fetch_osrm_durations(locations: list[Location]) -> "list[list[float | None]] | None":
+    """Call the OSRM public Table API and return an N×N matrix of road durations (seconds).
+    Returns None on any network or API failure so callers can fall back gracefully.
+    """
+    coords = ";".join(f"{loc.lon:.6f},{loc.lat:.6f}" for loc in locations)
+    url = _OSRM_TABLE_URL.format(coords=coords)
+    try:
+        req = _urllib.Request(url, headers={"User-Agent": "RoutePlannerApp/1.0"})
+        with _urllib.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        if data.get("code") == "Ok":
+            return data["durations"]  # list[list[float | None]]
+    except Exception:
+        pass
+    return None
+
+
 def build_car_matrix(locations: list[Location]) -> list[list[tuple[TravelMode, timedelta]]]:
-    """All-car matrix — only valid for days where the car was taken from home.
-    Every leg uses CAR; the car travels with the user for the entire day and back.
+    """All-car matrix for days where the car was taken from home.
+    Uses actual OSRM road durations; falls back to straight-line / 100 km/h per route
+    that OSRM cannot resolve or if the API is unavailable.
     """
     n = len(locations)
     matrix: list[list[tuple[TravelMode, timedelta]]] = [
         [(TravelMode.CAR, timedelta())] * n for _ in range(n)
     ]
+    osrm = _fetch_osrm_durations(locations)
     for i in range(n):
         for j in range(n):
             if i == j:
                 continue
-            km = distance_km(locations[i], locations[j])
-            matrix[i][j] = (TravelMode.CAR, travel_time(km, TravelMode.CAR))
+            if osrm and osrm[i][j] is not None:
+                matrix[i][j] = (TravelMode.CAR, timedelta(seconds=osrm[i][j]))
+            else:
+                km = distance_km(locations[i], locations[j])
+                matrix[i][j] = (TravelMode.CAR, travel_time(km, TravelMode.CAR))
     return matrix

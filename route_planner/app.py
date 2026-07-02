@@ -306,7 +306,7 @@ if generate and st.session_state.clients:
         st.error(msg)
 
     if home_loc and geocoded:
-        with st.spinner("Optimizing schedule…"):
+        with st.spinner("Fetching road distances and optimizing schedule…"):
             locations = [home_loc] + [c.to_location() for c in geocoded]
             matrix    = build_time_matrix(locations, home_loc)
             week_start = week_input if isinstance(week_input, date) else date.today()

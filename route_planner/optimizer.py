@@ -36,16 +36,16 @@ def _find_feasible(
         arrive = current_time + travel
         arrive = max(arrive, _dt(day_date, client.window_start))
 
-        if arrive.time() > client.latest_arrival:
+        if arrive > _dt(day_date, client.latest_arrival):
             continue
 
         depart_visit = arrive + client.duration
 
-        if depart_visit.time() > client.window_end:
+        if depart_visit > _dt(day_date, client.window_end):
             continue
 
         _, home_travel = matrix[cli_idx][home_idx]
-        if (depart_visit + home_travel).time() > CURFEW:
+        if (depart_visit + home_travel) > _dt(day_date, CURFEW):
             continue
 
         results.append((client, arrive, mode, travel))
@@ -129,10 +129,10 @@ def _find_feasible_chain(
         mode, travel = matrix[cur_idx][cli_idx]
         arrive = current_time + travel
         arrive = max(arrive, _dt(day_date, client.window_start))
-        if arrive.time() > client.latest_arrival:
+        if arrive > _dt(day_date, client.latest_arrival):
             continue
         depart_visit = arrive + client.duration
-        if depart_visit.time() > client.window_end:
+        if depart_visit > _dt(day_date, client.window_end):
             continue
         results.append((client, arrive, mode, travel))
     return results
@@ -215,10 +215,10 @@ def _try_overnight(
     arrive = depart + travel
     arrive = max(arrive, _dt(day_date, client.window_start))
 
-    if arrive.time() > client.latest_arrival:
+    if arrive > _dt(day_date, client.latest_arrival):
         return False
     depart_visit = arrive + client.duration
-    if depart_visit.time() > client.window_end:
+    if depart_visit > _dt(day_date, client.window_end):
         return False
 
     # Commit the overnight on day_idx
@@ -281,15 +281,15 @@ def _simulate_day(
         arrive = current_time + travel
         arrive = max(arrive, _dt(day_date, client.window_start))
 
-        if arrive.time() > client.latest_arrival:
+        if arrive > _dt(day_date, client.latest_arrival):
             return None
 
         depart_visit = arrive + client.duration
-        if depart_visit.time() > client.window_end:
+        if depart_visit > _dt(day_date, client.window_end):
             return None
 
         _, home_travel = matrix[cli_idx][home_idx]
-        if (depart_visit + home_travel).time() > CURFEW:
+        if (depart_visit + home_travel) > _dt(day_date, CURFEW):
             return None
 
         day.legs.append(Leg(
