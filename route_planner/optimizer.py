@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timedelta
 from itertools import permutations
 
 from .models import Client, Day, Leg, Location, TravelMode, Visit, WeeklyPlan
-from .travel import build_car_matrix
+from .travel import TravelParams, build_car_matrix
 
 DEPART_HOME = time(7, 0)
 CURFEW = time(21, 0)
@@ -451,6 +451,7 @@ def build_weekly_plan(
     matrix: list[list[tuple[TravelMode, timedelta]]],
     locations: list[Location],
     week_start: date,
+    params: "TravelParams | None" = None,
 ) -> WeeklyPlan:
     loc_index = {loc.city: i for i, loc in enumerate(locations)}
     priority_clients = [c for c in clients if c.priority]
@@ -459,7 +460,7 @@ def build_weekly_plan(
     plan = WeeklyPlan(home=home, week_start=week_start)
     scheduled: set[str] = set()
     week_dates = [week_start + timedelta(days=i) for i in range(5)]
-    car_matrix = build_car_matrix(locations)
+    car_matrix = build_car_matrix(locations, params)
 
     # Pass 1: greedy scheduling, all days start at home, no overnights.
     # Each day independently tries train/flight and car modes; best result wins.
@@ -542,6 +543,7 @@ def build_weekly_plan_forced(
     matrix: list[list[tuple[TravelMode, timedelta]]],
     locations: list[Location],
     week_start: date,
+    params: "TravelParams | None" = None,
 ) -> WeeklyPlan:
     """
     Aggressive scheduler: chains overnight stays day-to-day to maximise visits

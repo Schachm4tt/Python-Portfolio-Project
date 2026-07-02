@@ -6,10 +6,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 from datetime import date, time, timedelta
 
+from route_planner.export import plan_to_ics  # noqa: E402
 from route_planner.geocoder import geocode_city  # noqa: E402
 from route_planner.models import Client, Location, WeeklyPlan  # noqa: E402
 from route_planner.optimizer import build_weekly_plan, build_weekly_plan_forced  # noqa: E402
-from route_planner.travel import build_time_matrix  # noqa: E402
+from route_planner.travel import TravelParams, build_time_matrix  # noqa: E402
 
 ALL_DAYS: frozenset = frozenset(range(5))  # Mon=0 … Fri=4
 
@@ -186,7 +187,15 @@ def _render_legend() -> None:
 
 st.set_page_config(page_title="Route Planner", layout="wide", page_icon="\U0001f5fa")
 
-for key, val in [("clients", []), ("plan", None), ("editing_idx", None), ("force_mode", False)]:
+_PARAM_DEFAULTS = {
+    "sp_car": 100, "sp_train": 150, "sp_flight": 600,
+    "oh_train": 30, "oh_flight": 150,
+    "fl_adv": 4.0, "gr_max": 6.0,
+}
+for key, val in [
+    ("clients", []), ("plan", None), ("editing_idx", None), ("force_mode", False),
+    *_PARAM_DEFAULTS.items(),
+]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -263,6 +272,55 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+
+    # ── Travel parameters ─────────────────────────────────────────────────────
+    with st.expander("Travel parameters", expanded=False):
+        st.markdown(
+            '<p style="font-size:12px;color:#6B7280;margin-bottom:6px;">'
+            'Changes take effect on the next Generate.</p>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("**Speeds (km/h)**")
+        _sc1, _sc2, _sc3 = st.columns(3)
+        _sc1.number_input("Car",    min_value=50,  max_value=200, step=10,  key="sp_car",
+                          label_visibility="visible")
+        _sc2.number_input("Train",  min_value=80,  max_value=350, step=10,  key="sp_train")
+        _sc3.number_input("Flight", min_value=400, max_value=900, step=50,  key="sp_flight")
+
+        st.markdown("**Overhead (minutes)**")
+        _oc1, _oc2 = st.columns(2)
+        _oc1.number_input("Train",  min_value=0,  max_value=120, step=5,  key="oh_train")
+        _oc2.number_input("Flight", min_value=60, max_value=360, step=15, key="oh_flight")
+
+        st.markdown("**Flight thresholds**")
+        _fc1, _fc2 = st.columns(2)
+        _fc1.number_input(
+            "Min. savings (h)",
+            min_value=0.5, max_value=8.0, step=0.5, format="%.1f", key="fl_adv",
+            help="Flight is used only if it saves at least this many hours over train",
+        )
+        _fc2.number_input(
+            "Max train (h)",
+            min_value=2.0, max_value=12.0, step=0.5, format="%.1f", key="gr_max",
+            help="If train one-way exceeds this, flight is always used regardless of savings",
+        )
+
+        if st.button("↺ Reset to defaults", key="reset_params", use_container_width=True):
+            for _k, _v in _PARAM_DEFAULTS.items():
+                st.session_state[_k] = _v
+            st.rerun()
+
+    travel_params = TravelParams(
+        speed_car=int(st.session_state.sp_car),
+        speed_train=int(st.session_state.sp_train),
+        speed_flight=int(st.session_state.sp_flight),
+        overhead_train_min=int(st.session_state.oh_train),
+        overhead_flight_min=int(st.session_state.oh_flight),
+        flight_min_advantage_h=float(st.session_state.fl_adv),
+        ground_max_one_way_h=float(st.session_state.gr_max),
+    )
+
     force_mode = st.checkbox(
         "Force all clients into one week",
         help="Chains overnight stays day-to-day instead of returning home each evening. "
@@ -308,12 +366,14 @@ if generate and st.session_state.clients:
     if home_loc and geocoded:
         with st.spinner("Fetching road distances and optimizing schedule…"):
             locations = [home_loc] + [c.to_location() for c in geocoded]
-            matrix    = build_time_matrix(locations, home_loc)
+            matrix    = build_time_matrix(locations, home_loc, travel_params)
             week_start = week_input if isinstance(week_input, date) else date.today()
             if force_mode:
-                plan = build_weekly_plan_forced(home_loc, geocoded, matrix, locations, week_start)
+                plan = build_weekly_plan_forced(
+                    home_loc, geocoded, matrix, locations, week_start, travel_params)
             else:
-                plan = build_weekly_plan(home_loc, geocoded, matrix, locations, week_start)
+                plan = build_weekly_plan(
+                    home_loc, geocoded, matrix, locations, week_start, travel_params)
             st.session_state.plan = plan
             st.session_state.force_mode = force_mode
 
@@ -339,6 +399,15 @@ if st.session_state.plan:
     _render_legend()
     st.divider()
     _render_calendar(plan)
+
+    st.divider()
+    ics_bytes = plan_to_ics(plan).encode("utf-8")
+    st.download_button(
+        label="Export to .ics",
+        data=ics_bytes,
+        file_name=f"route_plan_{plan.week_start.strftime('%Y-%m-%d')}.ics",
+        mime="text/calendar",
+    )
 
     if plan.unscheduled:
         st.divider()

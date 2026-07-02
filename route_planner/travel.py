@@ -1,53 +1,63 @@
 import json
 import urllib.request as _urllib
+from dataclasses import dataclass
 from datetime import timedelta
 
 from geopy.distance import geodesic
 
 from .models import Location, TravelMode
 
-# km/h averages including typical stops/overhead
-_SPEED = {
-    TravelMode.CAR:    100,   # Autobahn average with traffic
-    TravelMode.TRAIN:  150,   # ICE/high-speed effective speed, city-centre to city-centre
-    TravelMode.FLIGHT: 600,
-}
 
-# Fixed overhead added on top of travel time
-_OVERHEAD = {
-    TravelMode.CAR:    timedelta(minutes=0),
-    TravelMode.TRAIN:  timedelta(minutes=30),          # station access + boarding
-    TravelMode.FLIGHT: timedelta(hours=2, minutes=30), # airport + security + boarding
-}
+@dataclass
+class TravelParams:
+    speed_car: int = 100            # km/h — Autobahn average with traffic
+    speed_train: int = 150          # km/h — ICE/high-speed effective, city-centre to city-centre
+    speed_flight: int = 600         # km/h
+    overhead_car_min: int = 0       # minutes of fixed overhead on top of travel time
+    overhead_train_min: int = 30    # station access + boarding
+    overhead_flight_min: int = 150  # 2 h 30 m: airport + security + boarding
+    flight_min_advantage_h: float = 4.0  # min hours saved over train to choose flight
+    ground_max_one_way_h: float = 6.0    # train journey above this triggers flight regardless
+
 
 def distance_km(a: Location, b: Location) -> float:
     return geodesic((a.lat, a.lon), (b.lat, b.lon)).km
 
 
-def travel_time(km: float, mode: TravelMode) -> timedelta:
-    drive_hours = km / _SPEED[mode]
-    return timedelta(hours=drive_hours) + _OVERHEAD[mode]
+def travel_time(km: float, mode: TravelMode, params: TravelParams | None = None) -> timedelta:
+    p = params or TravelParams()
+    speeds = {
+        TravelMode.CAR:    p.speed_car,
+        TravelMode.TRAIN:  p.speed_train,
+        TravelMode.FLIGHT: p.speed_flight,
+    }
+    overheads = {
+        TravelMode.CAR:    timedelta(minutes=p.overhead_car_min),
+        TravelMode.TRAIN:  timedelta(minutes=p.overhead_train_min),
+        TravelMode.FLIGHT: timedelta(minutes=p.overhead_flight_min),
+    }
+    return timedelta(hours=km / speeds[mode]) + overheads[mode]
 
 
-_FLIGHT_MIN_ADVANTAGE = timedelta(hours=4)
-_GROUND_MAX_ONE_WAY   = timedelta(hours=6)   # above this, flight is used regardless of savings
-
-
-def best_leg(origin: Location, destination: Location, home: Location) -> tuple[TravelMode, timedelta]:
+def best_leg(
+    origin: Location, destination: Location, home: Location,
+    params: TravelParams | None = None,
+) -> tuple[TravelMode, timedelta]:
     """Return the fastest (mode, travel_time) for a single leg — train or flight only.
 
     Car is never returned here; it is only available via build_car_matrix for days
     where the traveller explicitly drove from home and keeps the car all day.
-    Flight is chosen when it saves ≥ 4 h over train,
-    OR when train one-way exceeds 6 h (making a same-day return infeasible).
+    Flight is chosen when it saves ≥ flight_min_advantage_h over train,
+    OR when train one-way exceeds ground_max_one_way_h (making a same-day return infeasible).
     """
+    p = params or TravelParams()
     km = distance_km(origin, destination)
-    train_time = travel_time(km, TravelMode.TRAIN)
+    train_time = travel_time(km, TravelMode.TRAIN, p)
 
     if km >= 300:
-        flight_time = travel_time(km, TravelMode.FLIGHT)
-        has_advantage   = train_time - flight_time >= _FLIGHT_MIN_ADVANTAGE
-        ground_too_slow = train_time > _GROUND_MAX_ONE_WAY
+        flight_time = travel_time(km, TravelMode.FLIGHT, p)
+        has_advantage   = train_time - flight_time >= timedelta(hours=p.flight_min_advantage_h)
+        ground_too_slow = train_time > timedelta(hours=p.ground_max_one_way_h)
         if has_advantage or ground_too_slow:
             return TravelMode.FLIGHT, flight_time
 
@@ -55,7 +65,9 @@ def best_leg(origin: Location, destination: Location, home: Location) -> tuple[T
 
 
 def build_time_matrix(
-    locations: list[Location], home: Location
+    locations: list[Location],
+    home: Location,
+    params: TravelParams | None = None,
 ) -> list[list[tuple[TravelMode, timedelta]]]:
     """Train/flight matrix — the default for all days without a car."""
     n = len(locations)
@@ -66,7 +78,7 @@ def build_time_matrix(
         for j in range(n):
             if i == j:
                 continue
-            matrix[i][j] = best_leg(locations[i], locations[j], home)
+            matrix[i][j] = best_leg(locations[i], locations[j], home, params)
     return matrix
 
 
@@ -86,15 +98,18 @@ def _fetch_osrm_durations(locations: list[Location]) -> "list[list[float | None]
         with _urllib.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         if data.get("code") == "Ok":
-            return data["durations"]  # list[list[float | None]]
+            return data["durations"]
     except Exception:
         pass
     return None
 
 
-def build_car_matrix(locations: list[Location]) -> list[list[tuple[TravelMode, timedelta]]]:
+def build_car_matrix(
+    locations: list[Location],
+    params: TravelParams | None = None,
+) -> list[list[tuple[TravelMode, timedelta]]]:
     """All-car matrix for days where the car was taken from home.
-    Uses actual OSRM road durations; falls back to straight-line / 100 km/h per route
+    Uses actual OSRM road durations; falls back to straight-line / car speed per route
     that OSRM cannot resolve or if the API is unavailable.
     """
     n = len(locations)
@@ -110,5 +125,5 @@ def build_car_matrix(locations: list[Location]) -> list[list[tuple[TravelMode, t
                 matrix[i][j] = (TravelMode.CAR, timedelta(seconds=osrm[i][j]))
             else:
                 km = distance_km(locations[i], locations[j])
-                matrix[i][j] = (TravelMode.CAR, travel_time(km, TravelMode.CAR))
+                matrix[i][j] = (TravelMode.CAR, travel_time(km, TravelMode.CAR, params))
     return matrix
