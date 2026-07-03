@@ -191,6 +191,7 @@ _PARAM_DEFAULTS = {
     "sp_car": 100, "sp_train": 150, "sp_flight": 600,
     "oh_train": 30, "oh_flight": 150,
     "fl_adv": 4.0, "gr_max": 6.0,
+    "opt_depth": 7,
 }
 for key, val in [
     ("clients", []), ("plan", None), ("editing_idx", None), ("force_mode", False),
@@ -306,6 +307,17 @@ with st.sidebar:
             help="If train one-way exceeds this, flight is always used regardless of savings",
         )
 
+        st.markdown("**Optimization depth**")
+        st.number_input(
+            "Clients permuted per day (N!)",
+            min_value=4, max_value=9, step=1, key="opt_depth",
+            help=(
+                "Tries all N! visit orderings per day to find the best sequence. "
+                "Higher = better results but slower. "
+                "4→24 · 5→120 · 6→720 · 7→5 040 · 8→40 320 · 9→362 880 orderings/day."
+            ),
+        )
+
         if st.button("↺ Reset to defaults", key="reset_params", use_container_width=True):
             for _k, _v in _PARAM_DEFAULTS.items():
                 st.session_state[_k] = _v
@@ -320,6 +332,7 @@ with st.sidebar:
         flight_min_advantage_h=float(st.session_state.fl_adv),
         ground_max_one_way_h=float(st.session_state.gr_max),
     )
+    opt_depth = int(st.session_state.opt_depth)
 
     force_mode = st.checkbox(
         "Force all clients into one week",
@@ -370,10 +383,10 @@ if generate and st.session_state.clients:
             week_start = week_input if isinstance(week_input, date) else date.today()
             if force_mode:
                 plan = build_weekly_plan_forced(
-                    home_loc, geocoded, matrix, locations, week_start, travel_params)
+                    home_loc, geocoded, matrix, locations, week_start, travel_params, opt_depth)
             else:
                 plan = build_weekly_plan(
-                    home_loc, geocoded, matrix, locations, week_start, travel_params)
+                    home_loc, geocoded, matrix, locations, week_start, travel_params, opt_depth)
             st.session_state.plan = plan
             st.session_state.force_mode = force_mode
 

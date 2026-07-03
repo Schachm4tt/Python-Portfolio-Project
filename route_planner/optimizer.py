@@ -1,5 +1,5 @@
 from datetime import date, datetime, time, timedelta
-from itertools import permutations
+from itertools import combinations, permutations
 
 from .models import Client, Day, Leg, Location, TravelMode, Visit, WeeklyPlan
 from .travel import TravelParams, build_car_matrix
@@ -313,6 +313,98 @@ def _simulate_day(
     return day
 
 
+def _simulate_order(
+    day_date: date,
+    ordered_clients: list[Client],
+    start_loc: Location,
+    home: Location,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+) -> tuple[Day, list[str]]:
+    """Simulate visiting clients in a fixed order; infeasible clients are silently skipped.
+    Unlike _simulate_day, this never aborts — it just skips clients that don't fit.
+    """
+    day = Day(date=day_date)
+    scheduled: list[str] = []
+    current_loc = start_loc
+    current_time = _dt(day_date, DEPART_HOME)
+    home_idx = loc_index[home.city]
+
+    for client in ordered_clients:
+        if day_date.weekday() not in client.allowed_days:
+            continue
+        cur_idx = loc_index[current_loc.city]
+        cli_idx = loc_index[client.city]
+        mode, travel = matrix[cur_idx][cli_idx]
+        arrive = current_time + travel
+        arrive = max(arrive, _dt(day_date, client.window_start))
+        if arrive > _dt(day_date, client.latest_arrival):
+            continue
+        depart_visit = arrive + client.duration
+        if depart_visit > _dt(day_date, client.window_end):
+            continue
+        _, home_travel = matrix[cli_idx][home_idx]
+        if (depart_visit + home_travel) > _dt(day_date, CURFEW):
+            continue
+        day.legs.append(Leg(
+            origin=current_loc, destination=client.to_location(),
+            mode=mode, travel_time=travel,
+            depart_at=current_time, arrive_at=arrive,
+        ))
+        day.visits.append(Visit(client=client, arrive_at=arrive, depart_at=depart_visit))
+        current_loc = client.to_location()
+        current_time = depart_visit
+        scheduled.append(client.name)
+
+    if current_loc.city != home.city:
+        i = loc_index[current_loc.city]
+        j = loc_index[home.city]
+        mode, travel = matrix[i][j]
+        day.legs.append(Leg(
+            origin=current_loc, destination=home,
+            mode=mode, travel_time=travel,
+            depart_at=current_time, arrive_at=current_time + travel,
+        ))
+
+    return day, scheduled
+
+
+def _best_day(
+    day_date: date,
+    candidates: list[Client],
+    start_loc: Location,
+    home: Location,
+    loc_index: dict[str, int],
+    matrix: list[list[tuple[TravelMode, timedelta]]],
+    max_perm: int = 7,
+) -> tuple[Day, list[str]]:
+    """Try all orderings of up to max_perm candidates; return the best (Day, scheduled_names).
+
+    Scoring: most priority clients first → most total clients → least travel time.
+    Always includes all priority clients in the search pool; optional slots fill the rest.
+    Replaces the greedy pick-earliest-arrival heuristic with exhaustive per-day search.
+    """
+    priority = [c for c in candidates if c.priority]
+    optional = [c for c in candidates if not c.priority]
+    pool = priority + optional[:max(0, max_perm - len(priority))]
+    priority_names = {c.name for c in pool if c.priority}
+
+    best_day: Day = Day(date=day_date)
+    best_sched: list[str] = []
+    best_prio = -1
+
+    for perm in permutations(pool):
+        day, sched = _simulate_order(day_date, list(perm), start_loc, home, loc_index, matrix)
+        prio_count = sum(1 for n in sched if n in priority_names)
+        if (prio_count > best_prio
+                or (prio_count == best_prio and len(sched) > len(best_sched))
+                or (prio_count == best_prio and len(sched) == len(best_sched)
+                    and day.total_travel_time < best_day.total_travel_time)):
+            best_day, best_sched, best_prio = day, sched, prio_count
+
+    return best_day, best_sched
+
+
 def _best_order(
     day: Day,
     home: Location,
@@ -442,6 +534,41 @@ def _improve(
                 if improved:
                     break
 
+        # 4. Move two clients together from day i to day j
+        if not improved:
+            for i in range(5):
+                if not _is_improvable(i) or len(plan.days[i].visits) < 2:
+                    continue
+                for j in range(5):
+                    if i == j or not _is_improvable(j):
+                        continue
+                    for v1, v2 in combinations(plan.days[i].visits, 2):
+                        if plan.days[j].date.weekday() not in v1.client.allowed_days:
+                            continue
+                        if plan.days[j].date.weekday() not in v2.client.allowed_days:
+                            continue
+                        moving = {v1.client.name, v2.client.name}
+                        clients_i = [v.client for v in plan.days[i].visits
+                                     if v.client.name not in moving]
+                        clients_j = ([v.client for v in plan.days[j].visits]
+                                     + [v1.client, v2.client])
+                        new_i = (_try_all_orders(clients_i, plan.days[i].date)
+                                 if clients_i else Day(date=plan.days[i].date))
+                        new_j = _try_all_orders(clients_j, plan.days[j].date)
+                        if new_i is not None and new_j is not None:
+                            old = (plan.days[i].total_travel_time
+                                   + plan.days[j].total_travel_time)
+                            new_t = new_i.total_travel_time + new_j.total_travel_time
+                            if new_t < old:
+                                plan.days[i] = new_i
+                                plan.days[j] = new_j
+                                improved = True
+                                break
+                    if improved:
+                        break
+                if improved:
+                    break
+
     return plan
 
 
@@ -452,6 +579,7 @@ def build_weekly_plan(
     locations: list[Location],
     week_start: date,
     params: "TravelParams | None" = None,
+    max_perm: int = 7,
 ) -> WeeklyPlan:
     loc_index = {loc.city: i for i, loc in enumerate(locations)}
     priority_clients = [c for c in clients if c.priority]
@@ -469,8 +597,8 @@ def build_weekly_plan(
         rem_optional = [c for c in optional_clients if c.name not in scheduled]
         rem = rem_priority + rem_optional
 
-        day_t, sched_t = _run_greedy(day_date, rem, home, home, loc_index, matrix)
-        day_c, sched_c = _run_greedy(day_date, rem, home, home, loc_index, car_matrix)
+        day_t, sched_t = _best_day(day_date, rem, home, home, loc_index, matrix, max_perm)
+        day_c, sched_c = _best_day(day_date, rem, home, home, loc_index, car_matrix, max_perm)
 
         # Prefer more clients scheduled; break ties with less total travel time
         use_car = (
@@ -544,6 +672,7 @@ def build_weekly_plan_forced(
     locations: list[Location],
     week_start: date,
     params: "TravelParams | None" = None,
+    max_perm: int = 7,
 ) -> WeeklyPlan:
     """
     Aggressive scheduler: chains overnight stays day-to-day to maximise visits
@@ -567,9 +696,9 @@ def build_weekly_plan_forced(
         is_last = day_idx == 4
 
         if is_last or not rem:
-            # Last day or all done: run normal greedy with return home at end
-            day, day_scheduled = _run_greedy(
-                day_date, rem, current_loc, home, loc_index, matrix
+            # Last day or all done: exhaustive search with return home at end
+            day, day_scheduled = _best_day(
+                day_date, rem, current_loc, home, loc_index, matrix, max_perm
             )
             plan.days.append(day)
             scheduled.update(day_scheduled)
@@ -583,10 +712,35 @@ def build_weekly_plan_forced(
             rem_after = [c for c in priority_clients + optional_clients if c.name not in scheduled]
 
             if rem_after and day.visits and end_loc.city != home.city:
-                # Stay overnight — tomorrow starts from here
-                day.overnight_at = end_loc
-                plan.has_overnight = True
-                current_loc = end_loc
+                # Decide: stay overnight or return home?
+                end_idx  = loc_index[end_loc.city]
+                home_idx = loc_index[home.city]
+                _, return_travel = matrix[end_idx][home_idx]
+                can_return = (end_time + return_travel) <= _dt(day_date, CURFEW)
+
+                if not can_return:
+                    # Curfew makes returning home impossible — forced overnight
+                    stay_overnight = True
+                else:
+                    # Lookahead: simulate next day from current city vs from home
+                    next_date = week_dates[day_idx + 1]
+                    _, from_here = _run_greedy(next_date, rem_after, end_loc, home, loc_index, matrix)
+                    _, from_home = _run_greedy(next_date, rem_after, home,    home, loc_index, matrix)
+                    # Only stay if it lets us schedule strictly more clients tomorrow
+                    stay_overnight = len(from_here) > len(from_home)
+
+                if stay_overnight:
+                    day.overnight_at = end_loc
+                    plan.has_overnight = True
+                    current_loc = end_loc
+                else:
+                    mode, travel = matrix[end_idx][home_idx]
+                    day.legs.append(Leg(
+                        origin=end_loc, destination=home,
+                        mode=mode, travel_time=travel,
+                        depart_at=end_time, arrive_at=end_time + travel,
+                    ))
+                    current_loc = home
             else:
                 # All scheduled, no visits today, or already at home — return home
                 if end_loc.city != home.city:
