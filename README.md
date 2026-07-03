@@ -13,6 +13,8 @@ A weekly client visit planner for field sales and consulting work across Europe 
 - **Priority clients** — mark clients as must-visit; the planner schedules them first and drops optional clients if the week runs out of capacity
 - **Overnight stays** — when a destination is too far for a same-day return, the planner books a hotel night and starts the next day from that city
 - **Force mode** — optional aggressive scheduling that chains overnight stays day-to-day to fit all clients into one week
+- **Editable travel parameters** — adjust speeds, overheads, and flight thresholds directly in the UI without touching code
+- **ICS export** — download the generated plan as a `.ics` file for import into any calendar app
 - **Interactive UI** — Streamlit web app for data entry, editing, and calendar visualisation
 - **CLI mode** — run directly from a YAML file for scripting or testing
 
@@ -56,10 +58,12 @@ Opens at `http://localhost:8501`. Use `Ctrl+C` in the terminal to stop the serve
 **Workflow:**
 1. Set your home city and the Monday of the target week in the sidebar
 2. Add clients using the form — name, city, on-site duration, time window, priority flag, and available weekdays
-3. Optionally enable **Force all clients into one week** to allow chained overnight stays
-4. Click **Generate Plan**
-5. The calendar view shows each day's legs and visits with colour-coded cards
-6. Use the **✎** button next to any client to edit and then regenerate without re-entering all data
+3. Optionally open **Travel parameters** to adjust speeds, overheads, or flight thresholds
+4. Optionally enable **Force all clients into one week** to allow chained overnight stays
+5. Click **Generate Plan**
+6. The calendar view shows each day's legs and visits with colour-coded cards
+7. Use **Export to .ics** to download the plan for import into Google Calendar, Outlook, or Apple Calendar
+8. Use the **✎** button next to any client to edit and then regenerate without re-entering all data
 
 ### CLI
 
@@ -96,9 +100,11 @@ clients:
 
 ### Travel time estimation
 
-Travel times are estimated from straight-line (geodesic) distances — no external routing API is required.
+Travel times are estimated from straight-line (geodesic) distances. Car legs use actual road durations from the OpenStreetMap OSRM routing API when available, falling back to straight-line distance otherwise.
 
-| Mode | Speed | Fixed overhead |
+All parameters below are **editable in the UI** via the "Travel parameters" expander in the sidebar. The values shown are the defaults.
+
+| Mode | Default speed | Default overhead |
 |---|---|---|
 | Car | 100 km/h | none |
 | Train | 150 km/h | +30 min (station access + boarding) |
@@ -111,7 +117,7 @@ Each day is scheduled in one of two modes:
 **Train/flight day (default)**
 The planner never uses a car on these days — not for legs between clients, and not for the return home. Mode per leg:
 - **Train** is the default for all distances
-- **Flight** is used if it saves at least 4 hours over train, or if the train journey one-way exceeds 6 hours (making a same-day return impossible)
+- **Flight** is used if it saves at least 4 hours over train, or if the train journey one-way exceeds 6 hours (making a same-day return impossible); both thresholds are editable
 
 **Car day**
 Used when the traveller drives from home and keeps the car all day. Every leg — outbound, between clients, and return home — uses the car. No mode switching mid-day.
@@ -160,8 +166,9 @@ City names are resolved to coordinates using **Nominatim** (OpenStreetMap). Resu
 route_planner/
 ├── models.py       # Dataclasses: Client, Leg, Visit, Day, WeeklyPlan
 ├── geocoder.py     # City name → (lat, lon) via Nominatim
-├── travel.py       # Travel time matrices and mode selection
+├── travel.py       # TravelParams, travel time matrices, OSRM integration, mode selection
 ├── optimizer.py    # Two-pass scheduler + local search improvement
+├── export.py       # WeeklyPlan → RFC 5545 .ics calendar file
 ├── renderer.py     # Terminal output formatter (CLI mode)
 ├── app.py          # Streamlit web UI
 ├── main.py         # CLI entry point
@@ -174,7 +181,7 @@ route_planner/
 
 - **Estimated travel times** — straight-line distances underestimate road/rail distances (typically by 20–30%). The planner is accurate enough for weekly planning decisions but should not be used to schedule tight connections.
 - **No real transport schedules** — actual train departure times and flight availability are not checked. The output is a planning suggestion, not a bookable itinerary.
-- **Train speed is a global average** — 150 km/h reflects ICE-level high-speed rail. Slower regional trains (e.g. rural connections) are not modelled; the planner may overestimate train feasibility for non-hub cities.
+- **Train speed is a global average** — 150 km/h reflects ICE-level high-speed rail. Slower regional trains (e.g. rural connections) are not modelled; reduce the train speed in Travel parameters for regions without high-speed coverage.
 - **Greedy ordering** — the scheduler is not an exhaustive solver. For weeks with many clients and tight constraints, a different manual ordering might occasionally outperform the result.
 - **10 clients maximum** — the local search runs permutations up to 4! per day; beyond ~10 clients performance degrades.
 - **Car days are not improved** — once a day is assigned to car mode, the local search does not attempt to reorder visits or move clients to/from that day. The greedy order stands.
